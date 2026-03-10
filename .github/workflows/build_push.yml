@@ -27,14 +27,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu i686-unknown-linux-gnu powerpc-unknown-linux-gnu armv7-unknown-linux-gnueabi wasm32-unknown-unknown
       - run: RUSTFLAGS="-C target-feature=+neon" cargo build --target aarch64-unknown-linux-gnu
-      - run: RUSTFLAGS="-C target-feature=+neon" cargo +nightly build --target aarch64-unknown-linux-gnu --features fcma
       - run: RUSTFLAGS="-C target-feature=+sse4.1" cargo build --target i686-unknown-linux-gnu
-      - run: RUSTFLAGS="-C target-feature=+sse4.1" cargo +nightly build --target i686-unknown-linux-gnu --features sse
       - run: cargo build --target powerpc-unknown-linux-gnu
       - run: cargo +nightly build --target powerpc-unknown-linux-gnu
-      - run: RUSTFLAGS="-C target-feature=+avx2" cargo build --target x86_64-unknown-linux-gnu --features sse,avx
-      - run: RUSTFLAGS="-C target-feature=+avx2" cargo build --target x86_64-unknown-linux-gnu --features avx
-      - run: RUSTFLAGS="-C target-feature=+avx2,+f16c" cargo +nightly build --target x86_64-unknown-linux-gnu --features sse,avx
+      - run: RUSTFLAGS="-C target-feature=+avx2" cargo build --target x86_64-unknown-linux-gnu
       - run: cargo build --target armv7-unknown-linux-gnueabi
       - run: cargo build --target wasm32-unknown-unknown
 
@@ -82,7 +78,7 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        feature: [ neon, fcma, "" ]
+        feature: [ "" ]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -93,7 +89,7 @@ jobs:
     name: Tests x86_64
     strategy:
       matrix:
-        feature: [ sse, avx, "" ]
+        feature: [ "" ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
