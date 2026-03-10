@@ -1,0 +1,25 @@
+[package]
+name = "filtfilt"
+version = "0.1.0"
+edition = "2024"
+description = "Zero-phase forward-backward IIR filtering filtfilt"
+readme = "./README.md"
+keywords = ["cross-correlate", "dsp"]
+license = "BSD-3-Clause OR Apache-2.0"
+authors = ["Radzivon Bartoshyk"]
+documentation = "https://github.com/awxkee/filtfilt"
+categories = ["science", "algorithms"]
+homepage = "https://github.com/awxkee/filtfilt"
+repository = "https://github.com/awxkee/filtfilt.git"
+exclude = ["*.jpg", "./assets/*", "*.png"]
+rust-version = "1.89.0"
+include = ["/src/", "/README.md", "/LICENSE.md", "/LICENSE-APACHE.md"]
+
+[dependencies]
+num-traits = "0.2.19"
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features --no-deps --open --manifest-path ./Cargo.toml
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

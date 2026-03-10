@@ -1,0 +1,102 @@
+name: "Build"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'main'
+      - '!ci_test_*'
+      - 'ci_testing'
+    tags-ignore:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+      - '!ci_test_*'
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu i686-unknown-linux-gnu powerpc-unknown-linux-gnu armv7-unknown-linux-gnueabi wasm32-unknown-unknown
+      - run: RUSTFLAGS="-C target-feature=+neon" cargo build --target aarch64-unknown-linux-gnu
+      - run: RUSTFLAGS="-C target-feature=+neon" cargo +nightly build --target aarch64-unknown-linux-gnu --features fcma
+      - run: RUSTFLAGS="-C target-feature=+sse4.1" cargo build --target i686-unknown-linux-gnu
+      - run: RUSTFLAGS="-C target-feature=+sse4.1" cargo +nightly build --target i686-unknown-linux-gnu --features sse
+      - run: cargo build --target powerpc-unknown-linux-gnu
+      - run: cargo +nightly build --target powerpc-unknown-linux-gnu
+      - run: RUSTFLAGS="-C target-feature=+avx2" cargo build --target x86_64-unknown-linux-gnu --features sse,avx
+      - run: RUSTFLAGS="-C target-feature=+avx2" cargo build --target x86_64-unknown-linux-gnu --features avx
+      - run: RUSTFLAGS="-C target-feature=+avx2,+f16c" cargo +nightly build --target x86_64-unknown-linux-gnu --features sse,avx
+      - run: cargo build --target armv7-unknown-linux-gnueabi
+      - run: cargo build --target wasm32-unknown-unknown
+
+  clippy:
+    name: Clippy
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup component add clippy
+      - run: cargo clippy --all-features -- -D warnings
+
+  clippy-wasm:
+    name: Clippy WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add wasm32-unknown-unknown
+      - run: rustup component add clippy
+      - run: cargo clippy --target wasm32-unknown-unknown --all-features -- -D warnings
+
+  tests_wasm:
+    name: Tests WASM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: "latest"
+      - name: Run test suites with wasm-pack
+        run: wasm-pack test --node --features wasm
+
+  tests_arm:
+    name: Tests ARM
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        feature: [ neon, fcma, "" ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo test --features "${{ matrix.feature }}" --features neon --no-default-features
+      - run: cargo test --features "${{ matrix.feature }}" --features fcma --no-default-features
+
+  tests_x86_64:
+    name: Tests x86_64
+    strategy:
+      matrix:
+        feature: [ sse, avx, "" ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo test --features "${{ matrix.feature }}" --features sse --no-default-features
+      - run: cargo test --features "${{ matrix.feature }}" --features avx --no-default-features
