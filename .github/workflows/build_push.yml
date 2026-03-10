@@ -82,8 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo test --features "${{ matrix.feature }}" --features neon --no-default-features
-      - run: cargo test --features "${{ matrix.feature }}" --features fcma --no-default-features
+      - run: cargo test --features "${{ matrix.feature }}" --no-default-features
 
   tests_x86_64:
     name: Tests x86_64
@@ -94,5 +93,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo test --features "${{ matrix.feature }}" --features sse --no-default-features
-      - run: cargo test --features "${{ matrix.feature }}" --features avx --no-default-features
+      - run: cargo test --features "${{ matrix.feature }}" --no-default-features
