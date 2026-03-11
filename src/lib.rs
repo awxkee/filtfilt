@@ -27,10 +27,12 @@
  * // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 mod filtfilt;
+mod filtfilt_error;
 mod mla;
 mod pad;
 
 use crate::filtfilt::filtfilt_impl;
+use crate::filtfilt_error::FiltfiltError;
 use crate::pad::FilterPadding;
 
 /// Configuration for a zero-phase digital filter applied via [`filtfilt`] or [`filtfilt_f32`].
@@ -51,7 +53,7 @@ pub struct FilterOptions<'a> {
 }
 
 /// Applies a zero-phase forward-backward IIR filter to `x` (f64).
-pub fn filtfilt(x: &[f64], filtfilt_options: FilterOptions<'_>) -> Vec<f64> {
+pub fn filtfilt(x: &[f64], filtfilt_options: FilterOptions<'_>) -> Result<Vec<f64>, FiltfiltError> {
     filtfilt_impl(
         filtfilt_options.b.as_ref(),
         filtfilt_options.a.as_ref(),
@@ -66,14 +68,17 @@ pub fn filtfilt(x: &[f64], filtfilt_options: FilterOptions<'_>) -> Vec<f64> {
 /// Input is widened to `f64` internally for numerical stability,
 /// then the result is narrowed back to `f32` on return.
 ///
-pub fn filtfilt_f32(x: &[f32], filtfilt_options: FilterOptions<'_>) -> Vec<f32> {
-    filtfilt_impl(
+pub fn filtfilt_f32(
+    x: &[f32],
+    filtfilt_options: FilterOptions<'_>,
+) -> Result<Vec<f32>, FiltfiltError> {
+    Ok(filtfilt_impl(
         filtfilt_options.b.as_ref(),
         filtfilt_options.a.as_ref(),
         x.iter().map(|&x| x as f64).collect::<Vec<_>>().as_ref(),
         filtfilt_options.pad_type,
-    )
+    )?
     .iter()
     .map(|&x| x as f32)
-    .collect()
+    .collect::<Vec<_>>())
 }

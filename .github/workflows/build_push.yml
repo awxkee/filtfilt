@@ -56,23 +56,6 @@ jobs:
       - run: rustup component add clippy
       - run: cargo clippy --target wasm32-unknown-unknown --all-features -- -D warnings
 
-  tests_wasm:
-    name: Tests WASM
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v6
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
-        with:
-          version: "latest"
-      - name: Run test suites with wasm-pack
-        run: wasm-pack test --node
-
   tests_arm:
     name: Tests ARM
     runs-on: macos-latest

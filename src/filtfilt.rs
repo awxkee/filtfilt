@@ -26,6 +26,7 @@
  * // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+use crate::filtfilt_error::FiltfiltError;
 use crate::mla::fmla;
 use crate::pad::FilterPadding;
 
@@ -48,9 +49,13 @@ fn lfilter_zi(b: &[f64], a: &[f64]) -> Vec<f64> {
 
     // Direct implementation of scipy's lfilter_zi
     let rcp_a0 = 1. / a0;
-    let _b0 = b_pad[0] / a0;
-    for (i, dst) in zi[..m].iter_mut().enumerate() {
-        *dst = fmla(b_pad[i + 1], rcp_a0, -a_pad[i + 1] * a0 * b_pad[0] * a0);
+    let b_pad_zero = b_pad[0];
+    let _b0 = b_pad_zero / a0;
+    let b_pad_iter = b_pad[1..].iter();
+    let a_pad_iter = a_pad[1..].iter();
+    let scale = a0 * b_pad_zero * a0;
+    for ((dst, &b_pad), &a_pad) in zi[..m].iter_mut().zip(b_pad_iter).zip(a_pad_iter) {
+        *dst = fmla(b_pad, rcp_a0, -a_pad * scale);
     }
     // Accumulate
     for i in (1..m).rev() {
@@ -83,8 +88,11 @@ fn lfilter_with_zi(b: &[f64], a: &[f64], x: &[f64], zi: &[f64]) -> (Vec<f64>, Ve
 
     for i in 0..n {
         y[i] = fmla(b_full[0], x[i], z[0]);
-        for j in 0..m.saturating_sub(1) {
-            z[j] = fmla(b_full[j + 1], x[i], -a_full[j + 1] * y[i] + z[j + 1]);
+        for ((j, &b_full), &a_full) in (0..m.saturating_sub(1))
+            .zip(b_full[1..].iter())
+            .zip(a_full[1..].iter())
+        {
+            z[j] = fmla(b_full, x[i], fmla(-a_full, y[i], z[j + 1]));
         }
         if m > 0 {
             z[m - 1] = b_full[m] * x[i] - a_full[m] * y[i];
@@ -99,7 +107,32 @@ pub(crate) fn filtfilt_impl(
     a: &[f64],
     x: &[f64],
     filter_padding: FilterPadding,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, FiltfiltError> {
+    if b.is_empty() {
+        return Err(FiltfiltError::EmptyNumerator);
+    }
+    if a.is_empty() {
+        return Err(FiltfiltError::EmptyDenominator);
+    }
+    if a[0] == 0.0 || !a[0].is_finite() {
+        return Err(FiltfiltError::DenominatorLeadingZero);
+    }
+    if !b.iter().all(|v| v.is_finite()) || !a.iter().all(|v| v.is_finite()) {
+        return Err(FiltfiltError::NonFiniteCoefficients);
+    }
+    if x.is_empty() {
+        return Err(FiltfiltError::EmptySignal);
+    }
+
+    let mut a = std::borrow::Cow::Borrowed(a);
+    let mut b = std::borrow::Cow::Borrowed(b);
+    if (a[0] - 1.0).abs() > f64::EPSILON {
+        let a0 = a[0];
+        let rcp_a0 = 1. / a0;
+        b = std::borrow::Cow::Owned(b.iter().map(|&v| v * rcp_a0).collect::<Vec<_>>());
+        a = std::borrow::Cow::Owned(a.iter().map(|&v| v * rcp_a0).collect::<Vec<_>>());
+    };
+
     let n = x.len();
     let pad = 3 * (b.len().max(a.len()));
 
@@ -107,23 +140,23 @@ pub(crate) fn filtfilt_impl(
     let padded = filter_padding.extend(x, pad);
 
     // Initial conditions scaled to first sample
-    let zi_base = lfilter_zi(b, a);
+    let zi_base = lfilter_zi(b.as_ref(), a.as_ref());
     let zi: Vec<f64> = zi_base.iter().map(|&z| z * padded[0]).collect();
 
     // Forward pass
-    let (forward, _) = lfilter_with_zi(b, a, &padded, &zi);
+    let (forward, _) = lfilter_with_zi(b.as_ref(), a.as_ref(), &padded, &zi);
 
     // Reverse + backward pass
     let rev: Vec<f64> = forward.into_iter().rev().collect();
     let zi_back: Vec<f64> = zi_base.iter().map(|&z| z * rev[0]).collect();
-    let (backward, _) = lfilter_with_zi(b, a, &rev, &zi_back);
+    let (backward, _) = lfilter_with_zi(b.as_ref(), a.as_ref(), &rev, &zi_back);
 
     // Trim padding and reverse
-    backward[pad..pad + n]
+    Ok(backward[pad..pad + n]
         .iter()
         .rev()
         .copied()
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>())
 }
 
 #[cfg(test)]
@@ -248,7 +281,7 @@ mod tests {
         let x: Vec<f64> = (0..200).map(|i| (i as f64).sin()).collect();
         let b = vec![0.1, 0.2, 0.1];
         let a = vec![1.0, -0.5, 0.1];
-        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd).unwrap();
         assert_eq!(y.len(), x.len());
     }
 
@@ -277,7 +310,7 @@ mod tests {
             -7.086848740900965,
             0.8721086450898761,
         ];
-        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd).unwrap();
         no_nans(&y, "filtfilt_impl bandpass");
     }
 
@@ -293,7 +326,7 @@ mod tests {
             .collect();
         let b = vec![0.1, 0.2, 0.1];
         let a = vec![1.0, -0.5, 0.1];
-        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd).unwrap();
 
         // Find peak index in middle portion (avoid edges)
         let peak_x = x[50..n - 50]
@@ -322,7 +355,7 @@ mod tests {
         let x = vec![5.0f64; 100];
         let b = vec![0.5, 0.5];
         let a = vec![1.0, 0.0];
-        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd).unwrap();
         for (i, &v) in y.iter().enumerate() {
             assert!((v - 5.0).abs() < 1e-8, "index {}: got {}", i, v);
         }
@@ -340,7 +373,7 @@ mod tests {
         // Low-pass like coefficients
         let b = vec![0.5, 0.5];
         let a = vec![1.0, 0.0];
-        let y = filtfilt_impl(&b, &a, &x_high, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x_high, FilterPadding::Odd).unwrap();
 
         let rms_in: f64 = (x_high.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
         let rms_out: f64 = (y.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
@@ -363,7 +396,7 @@ mod tests {
             -0.0, 0.2787264, 0.5463412, 0.7921743, 1.0064125, 1.1804632, 1.3073317, 1.3826565,
             1.4087276, 1.4023399,
         ];
-        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd);
+        let y = filtfilt_impl(&b, &a, &x, FilterPadding::Odd).unwrap();
         println!("{:#?}", y);
         for (i, (a, e)) in y.iter().zip(expected.iter()).enumerate() {
             assert!(
