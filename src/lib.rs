@@ -33,7 +33,7 @@ mod pad;
 
 use crate::filtfilt::filtfilt_impl;
 use crate::filtfilt_error::FiltfiltError;
-use crate::pad::FilterPadding;
+pub use crate::pad::FilterPadding;
 
 /// Configuration for a zero-phase digital filter applied via [`filtfilt`] or [`filtfilt_f32`].
 ///
