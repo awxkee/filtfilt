@@ -81,19 +81,18 @@ impl FilterPadding {
                 let first = 2f64.as_() * slice[0];
                 let last = 2f64.as_() * slice[slice.len() - 1];
                 let start = &mut padded_slice[..pad];
-                for (i, dst) in start.iter_mut().rev().enumerate() {
-                    let idx = (i as i64 - pad as i64).rem_euclid(slice.len() as i64);
-                    *dst = first - slice[idx as usize];
+                for (i, dst) in start.iter_mut().enumerate() {
+                    let idx = (pad - i).min(slice.len() - 1);
+                    *dst = first - slice[idx];
                 }
 
                 let middle = &mut padded_slice[pad..pad + slice.len()];
                 middle.copy_from_slice(slice);
 
                 let end = &mut padded_slice[pad + slice.len()..];
-                let end_start = pad as i64 + slice.len() as i64;
-                for (i, dst) in end.iter_mut().rev().enumerate() {
-                    let idx = (i as i64 + end_start + 1).rem_euclid(slice.len() as i64);
-                    *dst = last - slice[idx as usize];
+                for (i, dst) in end.iter_mut().enumerate() {
+                    let mirror_idx = (slice.len() as i64 - 2 - i as i64).max(0) as usize;
+                    *dst = last - slice[mirror_idx];
                 }
             }
             FilterPadding::Even => {
