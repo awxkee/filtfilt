@@ -95,7 +95,7 @@ fn lfilter_with_zi(b: &[f64], a: &[f64], x: &[f64], zi: &[f64]) -> (Vec<f64>, Ve
             z[j] = fmla(b_full, xi, fmla(-a_full, *yi, z[j + 1]));
         }
         if m > 0 {
-            z[m - 1] = b_full[m] * xi - a_full[m] * *yi;
+            z[m - 1] = fmla(b_full[m], xi, -a_full[m] * *yi);
         }
     }
 
