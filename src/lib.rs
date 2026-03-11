@@ -47,7 +47,9 @@ use crate::pad::FilterPadding;
 /// - `pad_type` — edge extension strategy used before filtering to reduce
 ///   boundary transients. See [`FilterPadding`].
 pub struct FilterOptions<'a> {
+    /// Denominator
     pub a: std::borrow::Cow<'a, [f64]>,
+    /// Numerator
     pub b: std::borrow::Cow<'a, [f64]>,
     pub pad_type: FilterPadding,
 }

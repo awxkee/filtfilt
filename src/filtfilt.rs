@@ -86,18 +86,16 @@ fn lfilter_with_zi(b: &[f64], a: &[f64], x: &[f64], zi: &[f64]) -> (Vec<f64>, Ve
         *v_dst = v * rcp_a0;
     }
 
-    for i in 0..n {
-        y[i] = fmla(b_full[0], x[i], z[0]);
-        for ((((j, &b_full), &a_full), &x), &y) in (0..m.saturating_sub(1))
+    for (&xi, yi) in x.iter().zip(y.iter_mut()) {
+        *yi = fmla(b_full[0], xi, z[0]);
+        for ((j, &b_full), &a_full) in (0..m.saturating_sub(1))
             .zip(b_full[1..].iter())
             .zip(a_full[1..].iter())
-            .zip(x.iter())
-            .zip(y.iter())
         {
-            z[j] = fmla(b_full, x, fmla(-a_full, y, z[j + 1]));
+            z[j] = fmla(b_full, xi, fmla(-a_full, *yi, z[j + 1]));
         }
         if m > 0 {
-            z[m - 1] = fmla(b_full[m], x[i], -a_full[m] * y[i]);
+            z[m - 1] = b_full[m] * xi - a_full[m] * *yi;
         }
     }
 
