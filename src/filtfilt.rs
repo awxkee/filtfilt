@@ -30,46 +30,203 @@ use crate::filtfilt_error::FiltfiltError;
 use crate::mla::fmla;
 use crate::pad::FilterPadding;
 
-fn lfilter_zi(b: &[f64], a: &[f64]) -> Vec<f64> {
+/// Compute the initial conditions for [`lfilter_with_zi`] that correspond to
+/// the steady state of the step response.
+///
+/// The returned vector `zi` has length `max(b.len(), a.len()) - 1`.  When the
+/// filter order is zero (both `b` and `a` have length 1) there are no delay
+/// elements and an empty vector is returned.
+///
+/// # Steady-state meaning
+///
+/// `zi` satisfies `(I - A) * zi = B` where
+///
+/// ```text
+/// A = companion(a).T          (the state-transition matrix)
+/// B = b[1:] - a[1:] * b[0]   (the input vector, after normalising a[0] = 1)
+pub fn lfilter_zi(b: &[f64], a: &[f64]) -> Result<Vec<f64>, FiltfiltError> {
+    if b.is_empty() {
+        return Err(FiltfiltError::EmptyNumerator);
+    }
+    if a.is_empty() {
+        return Err(FiltfiltError::EmptyDenominator);
+    }
+    if a[0] == 0.0 || !a[0].is_finite() {
+        return Err(FiltfiltError::DenominatorLeadingZero);
+    }
+    if !b.iter().chain(a.iter()).all(|v| v.is_finite()) {
+        return Err(FiltfiltError::NonFiniteCoefficients);
+    }
+
+    // ... compute denom ...
+
     let n = b.len().max(a.len());
+
+    // Normalise so a[0] == 1
+    let a0 = a[0];
+    let rcp_a0 = 1.0 / a0;
+
     let mut b_pad = vec![0.0f64; n];
     let mut a_pad = vec![0.0f64; n];
-    for (&v, v_dst) in b.iter().zip(b_pad.iter_mut()) {
-        *v_dst = v;
+    for (dst, &v) in b_pad.iter_mut().zip(b.iter()) {
+        *dst = v * rcp_a0;
     }
-    for (&v, v_dst) in a.iter().zip(a_pad.iter_mut()) {
-        *v_dst = v;
+    for (dst, &v) in a_pad.iter_mut().zip(a.iter()) {
+        *dst = v * rcp_a0;
     }
 
-    let a0 = a_pad[0];
     let m = n - 1;
+    if m == 0 {
+        return Ok(vec![]);
+    }
 
-    // zi satisfies: zi = A*zi + b[1:] - a[1:]*b[0]/a[0]
+    // B = b[1:] - a[1:] * b[0]
+    // zi[0] = B.sum() / (1 + a[1] + a[2] + ... + a[m])
+    // zi[k] = asum * zi[0] - csum   for k in 1..m
+    //
+    // This is the explicit solution to (I - companion(a).T) * zi = B
+    // from scipy's lfilter_zi, avoiding a full matrix solve.
+
+    let b0 = b_pad[0];
+    let b_sum: f64 = b_pad[1..].iter().sum::<f64>();
+    let a_tail_sum: f64 = a_pad[1..].iter().sum::<f64>();
+
+    // B.sum() = sum(b[1:]) - b[0] * sum(a[1:])
+    let b_rhs_sum = fmla(-b0, a_tail_sum, b_sum);
+    // IminusA[:,0].sum() = 1 + sum(a[1:])
+    let denom = 1.0 + a_tail_sum;
+
+    // denom = 1 + sum(a[1:]) == 0 means a pole sits exactly at z=1.
+    // zi[0] would be NaN or inf — catch it before the divide.
+    if denom == 0.0 {
+        return Err(FiltfiltError::UnstableAtDc);
+    }
+
     let mut zi = vec![0.0f64; m];
+    let z0 = b_rhs_sum / denom;
+    zi[0] = z0;
 
-    // Direct implementation of scipy's lfilter_zi
-    let rcp_a0 = 1. / a0;
-    let b_pad_zero = b_pad[0];
-    let _b0 = b_pad_zero / a0;
-    let b_pad_iter = b_pad[1..].iter();
-    let a_pad_iter = a_pad[1..].iter();
-    let scale = a0 * b_pad_zero * a0;
-    for ((dst, &b_pad), &a_pad) in zi[..m].iter_mut().zip(b_pad_iter).zip(a_pad_iter) {
-        *dst = fmla(b_pad, rcp_a0, -a_pad * scale);
-    }
-    // Accumulate
-    for i in (1..m).rev() {
-        zi[i - 1] += zi[i];
+    let mut asum = 1.0_f64;
+    let mut csum = 0.0_f64;
+
+    for ((&a_pad, &b_pad), zi) in a_pad[1..]
+        .iter()
+        .zip(b_pad[1..].iter())
+        .zip(zi[1..].iter_mut())
+    {
+        asum += a_pad;
+        csum = fmla(-a_pad, b0, csum + b_pad);
+        *zi = fmla(asum, z0, -csum);
     }
 
-    zi
+    Ok(zi)
 }
 
-fn lfilter_with_zi(b: &[f64], a: &[f64], x: &[f64], zi: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub struct LFilterState {
+    pub y: Vec<f64>,
+    pub zi: Vec<f64>,
+}
+
+/// Builder for a single-direction IIR filter pass, constructed from
+/// numerator (`b`) and denominator (`a`) coefficients.
+///
+/// Obtain via [`LFilterBuilder::new`], optionally set initial conditions
+/// with [`.zi()`][LFilterBuilder::zi], then call
+/// [`.filter()`][LFilterBuilder::filter] to run the filter.
+pub struct LFilterBuilder<'a> {
+    /// Numerator (FIR part) coefficients `[b0, b1, …, bP]`.
+    pub b: &'a [f64],
+    /// Denominator (IIR part) coefficients `[a0, a1, …, aQ]`.
+    /// `a[0]` is the leading term and must be non-zero; coefficients are
+    /// normalised by `a[0]` internally.
+    pub a: &'a [f64],
+    /// Optional initial filter state of length `max(b.len(), a.len()) - 1`.
+    /// `None` (the default) starts the filter from all zeros.
+    /// Set via [`.zi()`][LFilterBuilder::zi].
+    pub zi: Option<&'a [f64]>,
+}
+
+impl<'a> LFilterBuilder<'a> {
+    pub fn new(b: &'a [f64], a: &'a [f64]) -> Self {
+        Self { b, a, zi: None }
+    }
+
+    /// Set initial conditions.  Length must equal `max(b.len(), a.len()) - 1`.
+    /// If not called, the filter starts from all zeros.
+    pub fn zi(mut self, zi: &'a [f64]) -> Self {
+        self.zi = Some(zi);
+        self
+    }
+
+    pub fn filter(self, x: &[f64]) -> Result<LFilterState, FiltfiltError> {
+        lfilter_with_zi(x, self)
+    }
+}
+
+/// Apply an IIR filter to a signal with given initial conditions, returning
+/// the filtered output and the final filter state.
+///
+/// Implements the Direct Form II transposed difference equation:
+///
+/// ```text
+/// y[n] = b[0]*x[n] + z[0][n]
+/// z[k][n+1] = b[k+1]*x[n] - a[k+1]*y[n] + z[k+1][n]   for k in 0..m-1
+/// z[m-1][n+1] = b[m]*x[n] - a[m]*y[n]
+/// ```
+///
+/// where `m = max(b.len(), a.len()) - 1` is the filter order.
+///
+/// # Arguments
+///
+/// - `b` — numerator coefficients, length ≥ 1.
+/// - `a` — denominator coefficients, length ≥ 1.  `a[0]` is the leading
+///   term; all coefficients are normalised by `a[0]` internally so you do
+///   not need to normalise beforehand.
+/// - `x` — input signal.  An empty slice is valid and produces an empty
+///   output with `zf` equal to the input `zi` (no samples processed).
+/// - `zi` — initial filter state, length must equal `max(b.len(), a.len()) - 1`.
+///   Obtain a steady-state value from [`lfilter_zi`] and scale by `x[0]`:
+///   `let zi: Vec<f64> = lfilter_zi(b, a)?.iter().map(|&z| z * x[0]).collect();`
+pub fn lfilter_with_zi(
+    x: &[f64],
+    options: LFilterBuilder<'_>,
+) -> Result<LFilterState, FiltfiltError> {
+    let a = options.a;
+    let b = options.b;
+    let zi = options.zi;
+    // 1. b and a must be non-empty
+    if b.is_empty() {
+        return Err(FiltfiltError::EmptyNumerator);
+    }
+    if a.is_empty() {
+        return Err(FiltfiltError::EmptyDenominator);
+    }
+
+    // 2. a[0] must be finite and non-zero — it's the divisor for everything
+    if a[0] == 0.0 || !a[0].is_finite() {
+        return Err(FiltfiltError::DenominatorLeadingZero);
+    }
+
+    // 3. all coefficients must be finite — NaN/inf propagates silently otherwise
+    if !b.iter().chain(a.iter()).all(|v| v.is_finite()) {
+        return Err(FiltfiltError::NonFiniteCoefficients);
+    }
     let n = x.len();
     let m = b.len().max(a.len()) - 1;
     let mut y = vec![0.0f64; n];
-    let mut z = zi.to_vec();
+    // Validate or default zi
+    let mut z: Vec<f64> = match zi {
+        Some(zi) => {
+            if zi.len() != m {
+                return Err(FiltfiltError::ZiLengthMismatch {
+                    expected: m,
+                    got: zi.len(),
+                });
+            }
+            zi.to_vec()
+        }
+        None => vec![0.0; m],
+    };
     z.resize(m.max(1), 0.0); // ensure at least 1 element to avoid index panic
 
     let a0 = a[0];
@@ -99,7 +256,7 @@ fn lfilter_with_zi(b: &[f64], a: &[f64], x: &[f64], zi: &[f64]) -> (Vec<f64>, Ve
         }
     }
 
-    (y, z)
+    Ok(LFilterState { y, zi: z })
 }
 
 pub(crate) fn filtfilt_impl(
@@ -140,16 +297,20 @@ pub(crate) fn filtfilt_impl(
     let padded = filter_padding.extend(x, pad);
 
     // Initial conditions scaled to first sample
-    let zi_base = lfilter_zi(b.as_ref(), a.as_ref());
+    let zi_base = lfilter_zi(b.as_ref(), a.as_ref())?;
     let zi: Vec<f64> = zi_base.iter().map(|&z| z * padded[0]).collect();
 
     // Forward pass
-    let (forward, _) = lfilter_with_zi(b.as_ref(), a.as_ref(), &padded, &zi);
+    let LFilterState { y: forward, zi: _ } =
+        lfilter_with_zi(&padded, LFilterBuilder::new(b.as_ref(), a.as_ref()).zi(&zi))?;
 
     // Reverse + backward pass
     let rev: Vec<f64> = forward.into_iter().rev().collect();
     let zi_back: Vec<f64> = zi_base.iter().map(|&z| z * rev[0]).collect();
-    let (backward, _) = lfilter_with_zi(b.as_ref(), a.as_ref(), &rev, &zi_back);
+    let LFilterState { y: backward, zi: _ } = lfilter_with_zi(
+        &rev,
+        LFilterBuilder::new(b.as_ref(), a.as_ref()).zi(&zi_back),
+    )?;
 
     // Trim padding and reverse
     Ok(backward[pad..pad + n]
@@ -194,7 +355,7 @@ mod tests {
     #[test]
     fn test_lfilter_zi_identity_filter() {
         // b=[1], a=[1] → no state needed
-        let zi = lfilter_zi(&[1.0], &[1.0]);
+        let zi = lfilter_zi(&[1.0], &[1.0]).expect("Linear filter state got successfully");
         assert!(zi.is_empty());
     }
 
@@ -202,7 +363,8 @@ mod tests {
     fn test_lfilter_zi_simple_lowpass() {
         // Simple first-order: b=[0.5, 0.5], a=[1.0, -0.0]
         // scipy: lfilter_zi([0.5,0.5],[1.0,0.0]) == [0.5]
-        let zi = lfilter_zi(&[0.5, 0.5], &[1.0, 0.0]);
+        let zi =
+            lfilter_zi(&[0.5, 0.5], &[1.0, 0.0]).expect("Linear filter state got successfully");
         assert_eq!(zi.len(), 1);
         assert!((zi[0] - 0.5).abs() < 1e-10, "zi[0] = {}", zi[0]);
     }
@@ -212,7 +374,7 @@ mod tests {
         // zi length should be max(len(b), len(a)) - 1
         let b = vec![1.0, 2.0, 3.0];
         let a = vec![1.0, 0.5, 0.25];
-        let zi = lfilter_zi(&b, &a);
+        let zi = lfilter_zi(&b, &a).expect("Linear filter state got successfully");
         assert_eq!(zi.len(), 2);
     }
 
@@ -220,7 +382,7 @@ mod tests {
     fn test_lfilter_zi_no_nans() {
         let b = vec![0.1, 0.2, 0.1];
         let a = vec![1.0, -0.5, 0.1];
-        let zi = lfilter_zi(&b, &a);
+        let zi = lfilter_zi(&b, &a).expect("Linear filter state got successfully");
         no_nans(&zi, "lfilter_zi");
     }
 
@@ -232,7 +394,8 @@ mod tests {
     fn test_lfilter_with_zi_passthrough() {
         // b=[1], a=[1], zi=[] → output == input
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let (y, _) = lfilter_with_zi(&[1.0], &[1.0], &x, &[]);
+        let LFilterState { y, zi: _ } = lfilter_with_zi(&x, LFilterBuilder::new(&[1.0], &[1.0]))
+            .expect("Linear filter executed successfully");
         assert_vec_approx(&y, &x, TOL, "passthrough");
     }
 
@@ -242,9 +405,10 @@ mod tests {
         let b = vec![0.5, 0.5];
         let a = vec![1.0, 0.0];
         let x = vec![3.0; 20];
-        let zi_base = lfilter_zi(&b, &a);
+        let zi_base = lfilter_zi(&b, &a).expect("Linear filter state got successfully");
         let zi: Vec<f64> = zi_base.iter().map(|&z| z * x[0]).collect();
-        let (y, _) = lfilter_with_zi(&b, &a, &x, &zi);
+        let LFilterState { y, zi: _ } = lfilter_with_zi(&x, LFilterBuilder::new(&b, &a).zi(&zi))
+            .expect("Linear filter executed successfully");
         // All outputs should equal 3.0 (settled)
         for (i, &v) in y.iter().enumerate() {
             assert!((v - 3.0).abs() < 1e-10, "index {}: got {}", i, v);
@@ -257,7 +421,8 @@ mod tests {
         let b = vec![0.1, 0.2, 0.1];
         let a = vec![1.0, -0.5, 0.1];
         let zi = vec![0.0; 2];
-        let (y, zf) = lfilter_with_zi(&b, &a, &x, &zi);
+        let LFilterState { y, zi: zf } = lfilter_with_zi(&x, LFilterBuilder::new(&b, &a).zi(&zi))
+            .expect("Linear filter executed successfully");
         assert_eq!(y.len(), 100);
         assert_eq!(zf.len(), 2);
     }
@@ -268,7 +433,8 @@ mod tests {
         let b = vec![0.2, 0.5, 0.2];
         let a = vec![1.0, -0.3, 0.1];
         let zi = vec![0.0; 2];
-        let (y, _) = lfilter_with_zi(&b, &a, &x, &zi);
+        let LFilterState { y, zi: _ } = lfilter_with_zi(&x, LFilterBuilder::new(&b, &a).zi(&zi))
+            .expect("Linear filter executed successfully");
         no_nans(&y, "lfilter_with_zi");
     }
 

@@ -35,6 +35,8 @@ pub enum FiltfiltError {
     NonFiniteCoefficients,
     EmptySignal,
     SignalTooShort { signal_len: usize, required: usize },
+    UnstableAtDc,
+    ZiLengthMismatch { expected: usize, got: usize },
 }
 
 impl std::fmt::Display for FiltfiltError {
@@ -61,6 +63,10 @@ impl std::fmt::Display for FiltfiltError {
                  provide a longer signal or reduce filter order",
                 signal_len, required
             ),
+            FiltfiltError::UnstableAtDc => f.write_str("Unstable at DC"),
+            FiltfiltError::ZiLengthMismatch { expected, got } => {
+                f.write_fmt(format_args!("Zi should be {expected}, but got {got}"))
+            }
         }
     }
 }

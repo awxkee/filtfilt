@@ -30,10 +30,13 @@ mod filtfilt;
 mod filtfilt_error;
 mod mla;
 mod pad;
+mod sos;
 
 use crate::filtfilt::filtfilt_impl;
 use crate::filtfilt_error::FiltfiltError;
 pub use crate::pad::FilterPadding;
+pub use filtfilt::{LFilterBuilder, LFilterState, lfilter_with_zi, lfilter_zi};
+pub use sos::{SosFilter, SosFilterBuilder, SosFilterState, sosfilt, sosfilt_zi, sosfiltfilt};
 
 /// Configuration for a zero-phase digital filter applied via [`filtfilt`] or [`filtfilt_f32`].
 ///
