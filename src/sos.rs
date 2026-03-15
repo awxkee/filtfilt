@@ -27,24 +27,25 @@
  * // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 use crate::FilterPadding;
-use crate::filtfilt::lfilter_zi;
 use crate::filtfilt_error::FiltfiltError;
 use crate::mla::fmla;
+use crate::traits::{FilterSample, Filtering};
+use num_traits::AsPrimitive;
 
 #[derive(Debug, Copy, Clone)]
-pub struct SosFilter {
-    pub b: [f64; 3],
-    pub a: [f64; 3],
+pub struct SosFilter<T> {
+    pub b: [T; 3],
+    pub a: [T; 3],
 }
 
-impl SosFilter {
-    pub fn new(b: [f64; 3], a: [f64; 3]) -> Self {
+impl<T> SosFilter<T> {
+    pub fn new(b: [T; 3], a: [T; 3]) -> Self {
         Self { b, a }
     }
 }
 
-impl From<[f64; 6]> for SosFilter {
-    fn from(row: [f64; 6]) -> Self {
+impl<T: Copy> From<[T; 6]> for SosFilter<T> {
+    fn from(row: [T; 6]) -> Self {
         Self {
             b: [row[0], row[1], row[2]],
             a: [row[3], row[4], row[5]],
@@ -62,15 +63,17 @@ impl From<[f64; 6]> for SosFilter {
 /// zi[0] = (b[1] + b[2] - (a[1] + a[2])*b[0]) / (1 + a[1] + a[2])
 /// zi[1] = a[2]*zi[0] - (b[2] - a[2]*b[0])
 /// ```
-pub fn sosfilt_zi(sos: &[SosFilter]) -> Result<Vec<[f64; 2]>, FiltfiltError> {
+pub(crate) fn sosfilt_zi_impl<T: FilterSample + Filtering>(
+    sos: &[SosFilter<T>],
+) -> Result<Vec<[T; 2]>, FiltfiltError> {
     if sos.is_empty() {
         return Err(FiltfiltError::EmptyNumerator);
     }
-    let mut zi = vec![[0.; 2]; sos.len()];
-    let mut scale = 1.0_f64;
+    let mut zi = vec![[T::zero(); 2]; sos.len()];
+    let mut scale = T::one();
 
     for (dst, s) in zi.iter_mut().zip(sos.iter()) {
-        let [z0, z1] = lfilter_zi(&s.b, &s.a)?.try_into().unwrap();
+        let [z0, z1] = T::lfilter_zi(&s.b, &s.a)?.try_into().unwrap();
         *dst = [scale * z0, scale * z1];
 
         // DC gain of this section: sum(b) / sum(a)
@@ -84,8 +87,8 @@ pub fn sosfilt_zi(sos: &[SosFilter]) -> Result<Vec<[f64; 2]>, FiltfiltError> {
 
 /// Run one biquad section (Direct Form II transposed) over `x` in place,
 /// using and updating `z[0..2]`.
-fn sosfilt_section_inplace(b: &[f64; 3], a: &[f64; 3], x: &mut [f64], z: &mut [f64; 2]) {
-    let rcp_a0 = 1.0 / a[0];
+fn sosfilt_section_inplace<T: FilterSample>(b: &[T; 3], a: &[T; 3], x: &mut [T], z: &mut [T; 2]) {
+    let rcp_a0 = T::one() / a[0];
     let b0 = b[0] * rcp_a0;
     let b1 = b[1] * rcp_a0;
     let b2 = b[2] * rcp_a0;
@@ -106,11 +109,14 @@ fn sosfilt_section_inplace(b: &[f64; 3], a: &[f64; 3], x: &mut [f64], z: &mut [f
 ///
 /// The algorithm: for each `SosFilter` section run `filtfilt_impl` with that
 /// section's `(b, a)`. The output of each section feeds into the next.
-pub fn sosfiltfilt(
-    sos: &[SosFilter],
-    x: &[f64],
+pub(crate) fn sosfiltfilt_impl<T: FilterSample + Filtering>(
+    sos: &[SosFilter<T>],
+    x: &[T],
     padding: FilterPadding,
-) -> Result<Vec<f64>, FiltfiltError> {
+) -> Result<Vec<T>, FiltfiltError>
+where
+    f64: AsPrimitive<T>,
+{
     if sos.is_empty() {
         return Err(FiltfiltError::EmptyNumerator);
     }
@@ -118,7 +124,7 @@ pub fn sosfiltfilt(
         return Err(FiltfiltError::EmptySignal);
     }
     for s in sos {
-        if s.a[0] == 0.0 || !s.a[0].is_finite() {
+        if s.a[0] == T::zero() || !s.a[0].is_finite() {
             return Err(FiltfiltError::DenominatorLeadingZero);
         }
         if !s.b.iter().chain(s.a.iter()).all(|v| v.is_finite()) {
@@ -129,8 +135,8 @@ pub fn sosfiltfilt(
     let n_sections = sos.len();
 
     // Count trailing zeros in b[:,2] and a[:,2] to match scipy's ntaps formula
-    let trailing_b_zeros = sos.iter().filter(|s| s.b[2] == 0.0).count();
-    let trailing_a_zeros = sos.iter().filter(|s| s.a[2] == 0.0).count();
+    let trailing_b_zeros = sos.iter().filter(|s| s.b[2] == T::zero()).count();
+    let trailing_a_zeros = sos.iter().filter(|s| s.a[2] == T::zero()).count();
     let ntaps = 2 * n_sections + 1 - trailing_b_zeros.min(trailing_a_zeros);
     let edge = ntaps * 3;
 
@@ -145,11 +151,11 @@ pub fn sosfiltfilt(
     let mut ext = padding.extend(x, edge);
 
     // sosfilt_zi: one [z0, z1] per section
-    let zi: Vec<[f64; 2]> = sosfilt_zi(sos)?;
+    let zi: Vec<[T; 2]> = T::sosfilt_zi(sos)?;
 
     // ── forward pass ─────────────────────────────────────────────────────────
     let x0 = ext[0];
-    let mut z_fwd: Vec<[f64; 2]> = zi.iter().map(|&[z0, z1]| [z0 * x0, z1 * x0]).collect();
+    let mut z_fwd: Vec<[T; 2]> = zi.iter().map(|&[z0, z1]| [z0 * x0, z1 * x0]).collect();
 
     for (s, z) in sos.iter().zip(z_fwd.iter_mut()) {
         sosfilt_section_inplace(&s.b, &s.a, &mut ext, z);
@@ -157,7 +163,7 @@ pub fn sosfiltfilt(
 
     // ── backward pass ────────────────────────────────────────────────────────
     let y0 = ext[ext.len() - 1];
-    let mut z_back: Vec<[f64; 2]> = zi.iter().map(|&[z0, z1]| [z0 * y0, z1 * y0]).collect();
+    let mut z_back: Vec<[T; 2]> = zi.iter().map(|&[z0, z1]| [z0 * y0, z1 * y0]).collect();
 
     ext.reverse();
     for (s, z) in sos.iter().zip(z_back.iter_mut()) {
@@ -170,12 +176,12 @@ pub fn sosfiltfilt(
 }
 
 /// Output of a single-direction SOS filter pass.
-pub struct SosFilterState {
+pub struct SosFilterState<T> {
     /// Filtered signal, same length as input.
-    pub y: Vec<f64>,
+    pub y: Vec<T>,
     /// Final state for each section, shape `(n_sections, 2)`.
     /// Pass back as `zi` to continue filtering the next chunk.
-    pub zf: Vec<[f64; 2]>,
+    pub zf: Vec<[T; 2]>,
 }
 
 /// Builder for a single-direction SOS filter pass.
@@ -183,19 +189,19 @@ pub struct SosFilterState {
 /// Obtain via [`SosFilterBuilder::new`], optionally set per-section initial
 /// conditions with [`.zi()`][SosFilterBuilder::zi], then call
 /// [`.filter()`][SosFilterBuilder::filter] to run the filter.
-pub struct SosFilterBuilder<'a> {
+pub struct SosFilterBuilder<'a, T> {
     /// Second-order sections to apply in cascade order.
-    pub sos: &'a [SosFilter],
+    pub sos: &'a [SosFilter<T>],
     /// Optional per-section initial state, shape `(n_sections, 2)`.
     /// `None` (the default) starts every section from all zeros.
     /// Set via [`.zi()`][SosFilterBuilder::zi].
-    pub zi: Option<&'a [[f64; 2]]>,
+    pub zi: Option<&'a [[T; 2]]>,
 }
 
-impl<'a> SosFilterBuilder<'a> {
+impl<'a, T: Filtering> SosFilterBuilder<'a, T> {
     /// Create a new builder for the given SOS filter.
     /// Initial conditions default to all zeros.
-    pub fn new(sos: &'a [SosFilter]) -> Self {
+    pub fn new(sos: &'a [SosFilter<T>]) -> Self {
         Self { sos, zi: None }
     }
 
@@ -205,7 +211,7 @@ impl<'a> SosFilterBuilder<'a> {
     /// `[z0, z1]` being the two delay-line values for that section.
     /// Use [`sosfilt_zi`] to compute the steady-state conditions for a
     /// step response, then scale by `x[0]`:
-    pub fn zi(mut self, zi: &'a [[f64; 2]]) -> Self {
+    pub fn zi(mut self, zi: &'a [[T; 2]]) -> Self {
         self.zi = Some(zi);
         self
     }
@@ -216,8 +222,8 @@ impl<'a> SosFilterBuilder<'a> {
     /// the final per-section state `zf`.  Pass `zf` back via
     /// [`.zi()`][SosFilterBuilder::zi] on the next call to continue
     /// filtering in chunks without discontinuities.
-    pub fn filter(self, x: &[f64]) -> Result<SosFilterState, FiltfiltError> {
-        sosfilt(x, self)
+    pub fn filter(self, x: &[T]) -> Result<SosFilterState<T>, FiltfiltError> {
+        T::sosfilt(x, self)
     }
 }
 
@@ -243,7 +249,10 @@ impl<'a> SosFilterBuilder<'a> {
 ///   start from all zeros.  Use [`sosfilt_zi`] scaled by `x[0]` to start
 ///   from steady state.
 ///
-pub fn sosfilt(x: &[f64], options: SosFilterBuilder<'_>) -> Result<SosFilterState, FiltfiltError> {
+pub(crate) fn sosfilt_impl<T: FilterSample + Filtering>(
+    x: &[T],
+    options: SosFilterBuilder<'_, T>,
+) -> Result<SosFilterState<T>, FiltfiltError> {
     let sos = options.sos;
     let zi = options.zi;
     if sos.is_empty() {
@@ -253,7 +262,7 @@ pub fn sosfilt(x: &[f64], options: SosFilterBuilder<'_>) -> Result<SosFilterStat
         return Err(FiltfiltError::EmptySignal);
     }
     for s in sos {
-        if s.a[0] == 0.0 || !s.a[0].is_finite() {
+        if s.a[0] == T::zero() || !s.a[0].is_finite() {
             return Err(FiltfiltError::DenominatorLeadingZero);
         }
         if !s.b.iter().chain(s.a.iter()).all(|v| v.is_finite()) {
@@ -270,9 +279,9 @@ pub fn sosfilt(x: &[f64], options: SosFilterBuilder<'_>) -> Result<SosFilterStat
     }
 
     let mut buf = x.to_vec();
-    let mut zf: Vec<[f64; 2]> = match zi {
+    let mut zf: Vec<[T; 2]> = match zi {
         Some(zi) => zi.to_vec(),
-        None => vec![[0.0, 0.0]; sos.len()],
+        None => vec![[T::zero(), T::zero()]; sos.len()],
     };
 
     for (s, z) in sos.iter().zip(zf.iter_mut()) {
@@ -415,7 +424,7 @@ mod sosfilt_tests {
                 6.41351538057563064e-01,
             ],
         )];
-        let state = sosfilt(&x64(), SosFilterBuilder::new(&sos)).unwrap();
+        let state = f64::sosfilt(&x64(), SosFilterBuilder::new(&sos)).unwrap();
 
         assert_eq!(state.y.len(), 64);
         assert_eq!(state.zf.len(), 1);
@@ -502,7 +511,7 @@ mod sosfilt_tests {
             [-0.00000000000000000e+00, 0.00000000000000000e+00],
         ];
 
-        let state = sosfilt(&x64(), SosFilterBuilder::new(&sos).zi(&zi)).unwrap();
+        let state = f64::sosfilt(&x64(), SosFilterBuilder::new(&sos).zi(&zi)).unwrap();
 
         assert_eq!(state.y.len(), 64);
         assert_eq!(state.zf.len(), 4);
@@ -564,11 +573,11 @@ mod sosfilt_tests {
         let x = x64();
 
         // Full pass
-        let full = sosfilt(&x, SosFilterBuilder::new(&sos)).unwrap();
+        let full = f64::sosfilt(&x, SosFilterBuilder::new(&sos)).unwrap();
 
         // Two-chunk pass: state from first chunk seeds second chunk
-        let first = sosfilt(&x[..32], SosFilterBuilder::new(&sos)).unwrap();
-        let second = sosfilt(&x[32..], SosFilterBuilder::new(&sos).zi(&first.zf)).unwrap();
+        let first = f64::sosfilt(&x[..32], SosFilterBuilder::new(&sos)).unwrap();
+        let second = f64::sosfilt(&x[32..], SosFilterBuilder::new(&sos).zi(&first.zf)).unwrap();
 
         let chunked: Vec<f64> = first.y.iter().chain(&second.y).copied().collect();
         assert_close(&chunked, &full.y, "chunk continuity");
@@ -609,7 +618,7 @@ mod tests {
                 6.41351538057563064e-01,
             ],
         )];
-        let y = sosfiltfilt(&sos, &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos, &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.74580936351050742e-01,
             1.35280552472216237e-01,
@@ -716,7 +725,7 @@ mod tests {
     }
 
     /// butter(2, 0.1, output='sos')
-    fn sos2() -> Vec<SosFilter> {
+    fn sos2() -> Vec<SosFilter<f64>> {
         vec![SosFilter::new(
             [
                 2.00833655642112321e-02,
@@ -732,7 +741,7 @@ mod tests {
     }
 
     /// butter(4, 0.2, output='sos')
-    fn sos4() -> Vec<SosFilter> {
+    fn sos4() -> Vec<SosFilter<f64>> {
         vec![
             SosFilter::new(
                 [
@@ -762,7 +771,7 @@ mod tests {
     }
 
     /// butter(6, 0.15, output='sos')
-    fn sos6() -> Vec<SosFilter> {
+    fn sos6() -> Vec<SosFilter<f64>> {
         vec![
             SosFilter::new(
                 [
@@ -821,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order2_golden_first16() {
-        let y = sosfiltfilt(&sos2(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.74580936351050742e-01,
             1.35280552472216237e-01,
@@ -845,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order2_full() {
-        let y = sosfiltfilt(&sos2(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.74580936351050742e-01,
             1.35280552472216237e-01,
@@ -917,7 +926,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order4_golden_first16() {
-        let y = sosfiltfilt(&sos4(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos4(), &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.98714814211247126e-01,
             3.30179733233647715e-02,
@@ -941,7 +950,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order4_full() {
-        let y = sosfiltfilt(&sos4(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos4(), &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.98714814211247126e-01,
             3.30179733233647715e-02,
@@ -1013,7 +1022,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order6_golden_first16() {
-        let y = sosfiltfilt(&sos6(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos6(), &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.98991756836905598e-01,
             2.88230151179659604e-02,
@@ -1043,21 +1052,21 @@ mod tests {
     fn test_output_length_matches_input() {
         for &n in &[64, 128, 513, 1000] {
             let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
-            let y = sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
+            let y = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
             assert_eq!(y.len(), n, "length mismatch for n={n}");
         }
     }
 
     #[test]
     fn test_all_finite() {
-        let y = sosfiltfilt(&sos6(), &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos6(), &x64(), FilterPadding::Odd).unwrap();
         assert!(y.iter().all(|v| v.is_finite()), "output must be finite");
     }
 
     #[test]
     fn test_zero_signal_gives_zero_output() {
         let x = vec![0.0f64; 200];
-        let y = sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
         for (i, &v) in y.iter().enumerate() {
             assert!(v.abs() < 1e-14, "y[{i}] = {v}, expected 0 for zero input");
         }
@@ -1067,7 +1076,7 @@ mod tests {
     fn test_dc_preserved() {
         let dc = 3.7_f64;
         let x = vec![dc; 500];
-        let y = sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
         for &v in &y[50..450] {
             let err = (v - dc).abs();
             assert!(err < 1e-8, "DC not preserved: got {v:.17e}, expected {dc}");
@@ -1081,7 +1090,7 @@ mod tests {
         let x: Vec<f64> = (0..n)
             .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / 1000.0).sin())
             .collect();
-        let y = sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
 
         let trim_x = &x[200..n - 200];
         let trim_y = &y[200..n - 200];
@@ -1115,7 +1124,7 @@ mod tests {
         let x: Vec<f64> = (0..n)
             .map(|i| (std::f64::consts::PI * 0.9 * i as f64).sin())
             .collect();
-        let y = sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
 
         let rms = |v: &[f64]| (v.iter().map(|s| s * s).sum::<f64>() / v.len() as f64).sqrt();
         assert!(
@@ -1139,9 +1148,9 @@ mod tests {
             .map(|(&a, &b)| alpha * a + beta * b)
             .collect();
 
-        let yu = sosfiltfilt(&sos4(), &u, FilterPadding::Odd).unwrap();
-        let yv = sosfiltfilt(&sos4(), &v, FilterPadding::Odd).unwrap();
-        let y_combined = sosfiltfilt(&sos4(), &combined, FilterPadding::Odd).unwrap();
+        let yu = f64::sosfiltfilt(&sos4(), &u, FilterPadding::Odd).unwrap();
+        let yv = f64::sosfiltfilt(&sos4(), &v, FilterPadding::Odd).unwrap();
+        let y_combined = f64::sosfiltfilt(&sos4(), &combined, FilterPadding::Odd).unwrap();
         let y_expected: Vec<f64> = yu
             .iter()
             .zip(&yv)
@@ -1158,12 +1167,12 @@ mod tests {
     #[test]
     fn test_a0_scaling_invariance() {
         let x = x64();
-        let sos_scaled: Vec<SosFilter> = sos4()
+        let sos_scaled: Vec<SosFilter<f64>> = sos4()
             .iter()
             .map(|s| SosFilter::new(s.b.map(|v| v * 4.2), s.a.map(|v| v * 4.2)))
             .collect();
-        let y1 = sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
-        let y2 = sosfiltfilt(&sos_scaled, &x, FilterPadding::Odd).unwrap();
+        let y1 = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
+        let y2 = f64::sosfiltfilt(&sos_scaled, &x, FilterPadding::Odd).unwrap();
         assert_close(&y1, &y2, "a0-scaling invariance");
     }
 
@@ -1173,13 +1182,13 @@ mod tests {
 
     #[test]
     fn test_error_empty_sos() {
-        let err = sosfiltfilt(&[], &x64(), FilterPadding::Odd);
+        let err = f64::sosfiltfilt(&[], &x64(), FilterPadding::Odd);
         assert!(matches!(err, Err(FiltfiltError::EmptyNumerator)));
     }
 
     #[test]
     fn test_error_empty_signal() {
-        let err = sosfiltfilt(&sos2(), &[], FilterPadding::Odd);
+        let err = f64::sosfiltfilt(&sos2(), &[], FilterPadding::Odd);
         assert!(matches!(err, Err(FiltfiltError::EmptySignal)));
     }
 
@@ -1187,7 +1196,7 @@ mod tests {
     fn test_error_a0_zero() {
         let s = sos2()[0];
         let bad_sos = vec![SosFilter::new(s.b, [0.0, s.a[1], s.a[2]])];
-        let err = sosfiltfilt(&bad_sos, &x64(), FilterPadding::Odd);
+        let err = f64::sosfiltfilt(&bad_sos, &x64(), FilterPadding::Odd);
         assert!(matches!(err, Err(FiltfiltError::DenominatorLeadingZero)));
     }
 
@@ -1195,14 +1204,14 @@ mod tests {
     fn test_error_non_finite_coeff() {
         let s = sos2()[0];
         let bad_sos = vec![SosFilter::new([s.b[0], f64::NAN, s.b[2]], s.a)];
-        let err = sosfiltfilt(&bad_sos, &x64(), FilterPadding::Odd);
+        let err = f64::sosfiltfilt(&bad_sos, &x64(), FilterPadding::Odd);
         assert!(matches!(err, Err(FiltfiltError::NonFiniteCoefficients)));
     }
 
     #[test]
     fn test_short_signal() {
         let x: Vec<f64> = (0..12).map(|i| i as f64).collect();
-        let y = sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x, FilterPadding::Odd).unwrap();
         assert_eq!(y.len(), x.len());
         assert!(y.iter().all(|v| v.is_finite()));
     }
@@ -1213,7 +1222,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order2_even_padding_full() {
-        let y = sosfiltfilt(&sos2(), &x64(), FilterPadding::Even).unwrap();
+        let y = f64::sosfiltfilt(&sos2(), &x64(), FilterPadding::Even).unwrap();
         let expected = vec![
             -2.68258319927786482e-01,
             -2.60874159086016022e-01,
@@ -1285,7 +1294,7 @@ mod tests {
 
     #[test]
     fn test_sosfiltfilt_order4_even_padding_full() {
-        let y = sosfiltfilt(&sos4(), &x64(), FilterPadding::Even).unwrap();
+        let y = f64::sosfiltfilt(&sos4(), &x64(), FilterPadding::Even).unwrap();
         let expected = vec![
             -1.77660757051424055e-02,
             -6.52086985356567367e-02,
@@ -1362,8 +1371,8 @@ mod tests {
     #[test]
     fn test_odd_and_even_padding_differ() {
         let x = x64();
-        let y_odd = sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
-        let y_even = sosfiltfilt(&sos4(), &x, FilterPadding::Even).unwrap();
+        let y_odd = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Odd).unwrap();
+        let y_even = f64::sosfiltfilt(&sos4(), &x, FilterPadding::Even).unwrap();
         let max_diff = y_odd
             .iter()
             .zip(&y_even)
@@ -1379,7 +1388,7 @@ mod tests {
     fn test_both_padding_modes_finite_and_correct_length() {
         let x = x64();
         for padding in [FilterPadding::Odd, FilterPadding::Even] {
-            let y = sosfiltfilt(&sos4(), &x, padding).unwrap();
+            let y = f64::sosfiltfilt(&sos4(), &x, padding).unwrap();
             assert_eq!(y.len(), x.len(), "{padding:?}: length mismatch");
             assert!(
                 y.iter().all(|v| v.is_finite()),
@@ -1444,7 +1453,7 @@ mod tests {
                 ],
             ),
         ];
-        let y = sosfiltfilt(&sos, &x64(), FilterPadding::Even).unwrap();
+        let y = f64::sosfiltfilt(&sos, &x64(), FilterPadding::Even).unwrap();
         let expected = vec![
             0.4515574309472776,
             0.38976720607858445,
@@ -1502,7 +1511,7 @@ mod tests {
                 ],
             ),
         ];
-        let y = sosfiltfilt(&sos, &x64(), FilterPadding::Odd).unwrap();
+        let y = f64::sosfiltfilt(&sos, &x64(), FilterPadding::Odd).unwrap();
         let expected = vec![
             2.98991756836905598e-01,
             2.88230151179659604e-02,

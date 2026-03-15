@@ -31,12 +31,15 @@ mod filtfilt_error;
 mod mla;
 mod pad;
 mod sos;
+mod traits;
 
-use crate::filtfilt::filtfilt_impl;
+use crate::filtfilt::{filtfilt_impl, lfilter_with_zi_impl, lfilter_zi_impl};
 use crate::filtfilt_error::FiltfiltError;
 pub use crate::pad::FilterPadding;
-pub use filtfilt::{LFilterBuilder, LFilterState, lfilter_with_zi, lfilter_zi};
-pub use sos::{SosFilter, SosFilterBuilder, SosFilterState, sosfilt, sosfilt_zi, sosfiltfilt};
+use crate::sos::{sosfilt_impl, sosfilt_zi_impl};
+pub use filtfilt::{LFilterBuilder, LFilterState};
+pub use sos::{SosFilter, SosFilterBuilder, SosFilterState};
+pub use traits::Filtering;
 
 /// Configuration for a zero-phase digital filter applied via [`filtfilt`] or [`filtfilt_f32`].
 ///
@@ -49,16 +52,22 @@ pub use sos::{SosFilter, SosFilterBuilder, SosFilterState, sosfilt, sosfilt_zi, 
 /// - `b` — numerator (feedforward) coefficients.
 /// - `pad_type` — edge extension strategy used before filtering to reduce
 ///   boundary transients. See [`FilterPadding`].
-pub struct FilterOptions<'a> {
+pub struct FilterOptions<'a, T>
+where
+    [T]: ToOwned<Owned = Vec<T>>,
+{
     /// Denominator
-    pub a: std::borrow::Cow<'a, [f64]>,
+    pub a: std::borrow::Cow<'a, [T]>,
     /// Numerator
-    pub b: std::borrow::Cow<'a, [f64]>,
+    pub b: std::borrow::Cow<'a, [T]>,
     pub pad_type: FilterPadding,
 }
 
 /// Applies a zero-phase forward-backward IIR filter to `x` (f64).
-pub fn filtfilt(x: &[f64], filtfilt_options: FilterOptions<'_>) -> Result<Vec<f64>, FiltfiltError> {
+pub fn filtfilt(
+    x: &[f64],
+    filtfilt_options: FilterOptions<'_, f64>,
+) -> Result<Vec<f64>, FiltfiltError> {
     filtfilt_impl(
         filtfilt_options.b.as_ref(),
         filtfilt_options.a.as_ref(),
@@ -75,15 +84,194 @@ pub fn filtfilt(x: &[f64], filtfilt_options: FilterOptions<'_>) -> Result<Vec<f6
 ///
 pub fn filtfilt_f32(
     x: &[f32],
-    filtfilt_options: FilterOptions<'_>,
+    filtfilt_options: FilterOptions<'_, f32>,
 ) -> Result<Vec<f32>, FiltfiltError> {
-    Ok(filtfilt_impl(
+    filtfilt_impl(
         filtfilt_options.b.as_ref(),
         filtfilt_options.a.as_ref(),
-        x.iter().map(|&x| x as f64).collect::<Vec<_>>().as_ref(),
+        x,
         filtfilt_options.pad_type,
-    )?
-    .iter()
-    .map(|&x| x as f32)
-    .collect::<Vec<_>>())
+    )
+}
+
+/// Compute the initial conditions for [`lfilter_with_zi`] that correspond to
+/// the steady state of the step response.
+///
+/// The returned vector `zi` has length `max(b.len(), a.len()) - 1`.  When the
+/// filter order is zero (both `b` and `a` have length 1) there are no delay
+/// elements and an empty vector is returned.
+///
+/// # Steady-state meaning
+///
+/// `zi` satisfies `(I - A) * zi = B` where
+///
+/// ```text
+/// A = companion(a).T          (the state-transition matrix)
+/// B = b[1:] - a[1:] * b[0]   (the input vector, after normalising a[0] = 1)
+pub fn lfilter_zi(b: &[f64], a: &[f64]) -> Result<Vec<f64>, FiltfiltError> {
+    lfilter_zi_impl(b, a)
+}
+
+/// Compute the initial conditions for [`lfilter_with_zi`] that correspond to
+/// the steady state of the step response.
+///
+/// The returned vector `zi` has length `max(b.len(), a.len()) - 1`.  When the
+/// filter order is zero (both `b` and `a` have length 1) there are no delay
+/// elements and an empty vector is returned.
+///
+/// # Steady-state meaning
+///
+/// `zi` satisfies `(I - A) * zi = B` where
+///
+/// ```text
+/// A = companion(a).T          (the state-transition matrix)
+/// B = b[1:] - a[1:] * b[0]   (the input vector, after normalising a[0] = 1)
+pub fn lfilter_zi_f32(b: &[f32], a: &[f32]) -> Result<Vec<f32>, FiltfiltError> {
+    lfilter_zi_impl(b, a)
+}
+
+/// Apply an IIR filter to a signal with given initial conditions, returning
+/// the filtered output and the final filter state.
+///
+/// Implements the Direct Form II transposed difference equation:
+///
+/// ```text
+/// y[n] = b[0]*x[n] + z[0][n]
+/// z[k][n+1] = b[k+1]*x[n] - a[k+1]*y[n] + z[k+1][n]   for k in 0..m-1
+/// z[m-1][n+1] = b[m]*x[n] - a[m]*y[n]
+/// ```
+///
+/// where `m = max(b.len(), a.len()) - 1` is the filter order.
+///
+/// # Arguments
+///
+/// - `b` — numerator coefficients, length ≥ 1.
+/// - `a` — denominator coefficients, length ≥ 1.  `a[0]` is the leading
+///   term; all coefficients are normalised by `a[0]` internally so you do
+///   not need to normalise beforehand.
+/// - `x` — input signal.  An empty slice is valid and produces an empty
+///   output with `zf` equal to the input `zi` (no samples processed).
+/// - `zi` — initial filter state, length must equal `max(b.len(), a.len()) - 1`.
+///   Obtain a steady-state value from [`lfilter_zi`] and scale by `x[0]`:
+///   `let zi: Vec<f64> = lfilter_zi(b, a)?.iter().map(|&z| z * x[0]).collect();`
+pub fn lfilter_with_zi(
+    x: &[f64],
+    options: LFilterBuilder<'_, f64>,
+) -> Result<LFilterState<f64>, FiltfiltError> {
+    lfilter_with_zi_impl(x, options)
+}
+
+/// Apply an IIR filter to a signal with given initial conditions, returning
+/// the filtered output and the final filter state.
+///
+/// Implements the Direct Form II transposed difference equation:
+///
+/// ```text
+/// y[n] = b[0]*x[n] + z[0][n]
+/// z[k][n+1] = b[k+1]*x[n] - a[k+1]*y[n] + z[k+1][n]   for k in 0..m-1
+/// z[m-1][n+1] = b[m]*x[n] - a[m]*y[n]
+/// ```
+///
+/// where `m = max(b.len(), a.len()) - 1` is the filter order.
+///
+/// # Arguments
+///
+/// - `b` — numerator coefficients, length ≥ 1.
+/// - `a` — denominator coefficients, length ≥ 1.  `a[0]` is the leading
+///   term; all coefficients are normalised by `a[0]` internally so you do
+///   not need to normalise beforehand.
+/// - `x` — input signal.  An empty slice is valid and produces an empty
+///   output with `zf` equal to the input `zi` (no samples processed).
+/// - `zi` — initial filter state, length must equal `max(b.len(), a.len()) - 1`.
+///   Obtain a steady-state value from [`lfilter_zi`] and scale by `x[0]`:
+///   `let zi: Vec<f64> = lfilter_zi(b, a)?.iter().map(|&z| z * x[0]).collect();`
+pub fn lfilter_with_zi_f32(
+    x: &[f32],
+    options: LFilterBuilder<'_, f32>,
+) -> Result<LFilterState<f32>, FiltfiltError> {
+    lfilter_with_zi_impl(x, options)
+}
+
+/// Compute the initial conditions for one biquad section (b, a already
+/// normalised so a[0] == 1). Returns `[z0, z1]`.
+///
+/// Solves `(I - companion(a).T) * zi = b[1:] - a[1:]*b[0]` using the
+/// explicit recurrence from scipy's `lfilter_zi`:
+///
+/// ```text
+/// zi[0] = (b[1] + b[2] - (a[1] + a[2])*b[0]) / (1 + a[1] + a[2])
+/// zi[1] = a[2]*zi[0] - (b[2] - a[2]*b[0])
+/// ```
+pub fn sosfilt_zi(sos: &[SosFilter<f64>]) -> Result<Vec<[f64; 2]>, FiltfiltError> {
+    sosfilt_zi_impl(sos)
+}
+
+/// Compute the initial conditions for one biquad section (b, a already
+/// normalised so a[0] == 1). Returns `[z0, z1]`.
+///
+/// Solves `(I - companion(a).T) * zi = b[1:] - a[1:]*b[0]` using the
+/// explicit recurrence from scipy's `lfilter_zi`:
+///
+/// ```text
+/// zi[0] = (b[1] + b[2] - (a[1] + a[2])*b[0]) / (1 + a[1] + a[2])
+/// zi[1] = a[2]*zi[0] - (b[2] - a[2]*b[0])
+/// ```
+pub fn sosfilt_zi_f32(sos: &[SosFilter<f32>]) -> Result<Vec<[f32; 2]>, FiltfiltError> {
+    sosfilt_zi_impl(sos)
+}
+
+/// Apply a cascade of second-order sections to a signal in one direction.
+///
+/// Each section is a Direct Form II transposed biquad:
+///
+/// ```text
+/// y[n]     = b0*x[n] + z[0][n]
+/// z[0][n+1] = b1*x[n] - a1*y[n] + z[1][n]
+/// z[1][n+1] = b2*x[n] - a2*y[n]
+/// ```
+///
+/// Sections are applied in order; the output of section `k` is the input
+/// to section `k+1`.
+///
+/// # Arguments
+///
+/// - `sos` — second-order sections.
+/// - `x`   — input signal.
+/// - `zi`  — initial state, one `[z0, z1]` per section.  Pass `None` to
+///   start from all zeros.  Use [`sosfilt_zi`] scaled by `x[0]` to start
+///   from steady state.
+///
+pub fn sosfilt(
+    x: &[f64],
+    options: SosFilterBuilder<'_, f64>,
+) -> Result<SosFilterState<f64>, FiltfiltError> {
+    sosfilt_impl(x, options)
+}
+
+/// Apply a cascade of second-order sections to a signal in one direction.
+///
+/// Each section is a Direct Form II transposed biquad:
+///
+/// ```text
+/// y[n]     = b0*x[n] + z[0][n]
+/// z[0][n+1] = b1*x[n] - a1*y[n] + z[1][n]
+/// z[1][n+1] = b2*x[n] - a2*y[n]
+/// ```
+///
+/// Sections are applied in order; the output of section `k` is the input
+/// to section `k+1`.
+///
+/// # Arguments
+///
+/// - `sos` — second-order sections.
+/// - `x`   — input signal.
+/// - `zi`  — initial state, one `[z0, z1]` per section.  Pass `None` to
+///   start from all zeros.  Use [`sosfilt_zi`] scaled by `x[0]` to start
+///   from steady state.
+///
+pub fn sosfilt_f32(
+    x: &[f32],
+    options: SosFilterBuilder<'_, f32>,
+) -> Result<SosFilterState<f32>, FiltfiltError> {
+    sosfilt_impl(x, options)
 }

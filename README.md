@@ -12,7 +12,6 @@ It supports odd and even edge-extension padding to suppress boundary transients,
 - Odd (anti-symmetric) and even (symmetric) edge extension
 - `f32` and `f64` input support
 - Numerically stable — uses initial conditions (`zi`) to settle filter state before each pass
-- No unsafe code
 
 ## Usage
 ```rust
