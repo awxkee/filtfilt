@@ -37,6 +37,7 @@ use crate::filtfilt::{filtfilt_impl, lfilter_with_zi_impl, lfilter_zi_impl};
 use crate::filtfilt_error::FiltfiltError;
 pub use crate::pad::FilterPadding;
 use crate::sos::{sosfilt_impl, sosfilt_zi_impl};
+use crate::traits::FilterSample;
 pub use filtfilt::{LFilterBuilder, LFilterState};
 pub use sos::{SosFilter, SosFilterBuilder, SosFilterState};
 pub use traits::Filtering;
@@ -274,4 +275,30 @@ pub fn sosfilt_f32(
     options: SosFilterBuilder<'_, f32>,
 ) -> Result<SosFilterState<f32>, FiltfiltError> {
     sosfilt_impl(x, options)
+}
+
+/// Apply a digital filter forward and backward over a signal using
+/// second-order sections (SOS), matching scipy's `sosfiltfilt`.
+///
+/// The algorithm: for each `SosFilter` section run `filtfilt_impl` with that
+/// section's `(b, a)`. The output of each section feeds into the next.
+pub fn sosfiltfilt(
+    sos: &[SosFilter<f64>],
+    x: &[f64],
+    padding: FilterPadding,
+) -> Result<Vec<f64>, FiltfiltError> {
+    f64::sosfiltfilt(sos, x, padding)
+}
+
+/// Apply a digital filter forward and backward over a signal using
+/// second-order sections (SOS), matching scipy's `sosfiltfilt`.
+///
+/// The algorithm: for each `SosFilter` section run `filtfilt_impl` with that
+/// section's `(b, a)`. The output of each section feeds into the next.
+pub fn sosfiltfilt_f32(
+    sos: &[SosFilter<f32>],
+    x: &[f32],
+    padding: FilterPadding,
+) -> Result<Vec<f32>, FiltfiltError> {
+    f32::sosfiltfilt(sos, x, padding)
 }
