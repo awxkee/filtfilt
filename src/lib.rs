@@ -37,7 +37,6 @@ use crate::filtfilt::{filtfilt_impl, lfilter_with_zi_impl, lfilter_zi_impl};
 use crate::filtfilt_error::FiltfiltError;
 pub use crate::pad::FilterPadding;
 use crate::sos::{sosfilt_impl, sosfilt_zi_impl};
-use crate::traits::FilterSample;
 pub use filtfilt::{LFilterBuilder, LFilterState};
 pub use sos::{SosFilter, SosFilterBuilder, SosFilterState};
 pub use traits::Filtering;
