@@ -280,7 +280,7 @@ pub fn sosfilt_f32(
 /// Apply a digital filter forward and backward over a signal using
 /// second-order sections (SOS), matching scipy's `sosfiltfilt`.
 ///
-/// The algorithm: for each `SosFilter` section run `filtfilt_impl` with that
+/// The algorithm: for each `SosFilter` section run `filtfilt` with that
 /// section's `(b, a)`. The output of each section feeds into the next.
 pub fn sosfiltfilt(
     sos: &[SosFilter<f64>],
@@ -293,7 +293,7 @@ pub fn sosfiltfilt(
 /// Apply a digital filter forward and backward over a signal using
 /// second-order sections (SOS), matching scipy's `sosfiltfilt`.
 ///
-/// The algorithm: for each `SosFilter` section run `filtfilt_impl` with that
+/// The algorithm: for each `SosFilter` section run `filtfilt` with that
 /// section's `(b, a)`. The output of each section feeds into the next.
 pub fn sosfiltfilt_f32(
     sos: &[SosFilter<f32>],
